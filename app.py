@@ -19,6 +19,7 @@ from pymongo.errors import DuplicateKeyError
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import Optional
+import uuid
 
 load_dotenv()
 
@@ -58,20 +59,27 @@ except Exception as e:
     print(f"Error connecting to MongoDB: {str(e)}")
 
 # Add these new functions
-def create_new_user(username: str, password: str, role: str = 'user') -> tuple[bool, str]:
+def create_new_user(username: str, password: str, email: str, name: str, role: str = 'student') -> tuple[bool, str]:
     """Create a new user in MongoDB"""
     if len(password) < 6:
         return False, "Password must be at least 6 characters"
+    
+    # Validate role
+    if role not in ['student', 'instructor']:
+        return False, "Role must be either 'student' or 'instructor'"
     
     try:
         # Check if username exists
         if users_collection.find_one({'username': username}):
             return False, "Username already exists"
         
-        # Create new user
+        # Create new user with required fields
         user = {
+            'user_id': str(uuid.uuid4()),  # Generate unique user_id
             'username': username,
             'password': hash_password(password),
+            'email': email,
+            'name': name,
             'role': role,
             'created_at': datetime.utcnow(),
             'last_login': None
@@ -80,7 +88,7 @@ def create_new_user(username: str, password: str, role: str = 'user') -> tuple[b
         return True, "User created successfully"
     except Exception as e:
         return False, f"Error creating user: {str(e)}"
-
+    
 def get_user_role(username: str) -> Optional[str]:
     """Get user's role from MongoDB"""
     user = users_collection.find_one({'username': username})
@@ -88,24 +96,45 @@ def get_user_role(username: str) -> Optional[str]:
 
 # 6. Add MongoDB helper functions
 def initialize_mongodb():
-    """Initialize MongoDB with default admin user if not exists"""
+    """Initialize MongoDB with schema validation"""
     try:
-        admin_user = users_collection.find_one({'username': 'admin'})
-        if not admin_user:
-            admin_user = {
-                'username': 'admin',
-                'password': hash_password('admin123'),
-                'role': 'admin',
-                'created_at': datetime.utcnow(),
-                'last_login': None
+        # Create collection with schema validation
+        validator = {
+            '$jsonSchema': {
+                'bsonType': 'object',
+                'required': ['user_id', 'name', 'email', 'role'],
+                'properties': {
+                    'user_id': {'bsonType': 'string'},
+                    'username': {'bsonType': 'string'},
+                    'password': {'bsonType': 'string'},
+                    'email': {'bsonType': 'string'},
+                    'name': {'bsonType': 'string'},
+                    'role': {
+                        'enum': ['student', 'instructor'],
+                        'description': 'must be either student or instructor'
+                    },
+                    'created_at': {'bsonType': 'date'},
+                    'last_login': {'bsonType': ['date', 'null']}
+                }
             }
-            users_collection.insert_one(admin_user)
-            print("Default admin user created")
+        }
+        
+        try:
+            db.create_collection(USERS_COLLECTION)
+        except:
+            pass  # Collection might already exist
+            
+        db.command('collMod', USERS_COLLECTION, validator=validator)
+        
+        # Create unique index on username
+        users_collection.create_index('username', unique=True)
+        
+        print("MongoDB initialized successfully")
         return True
     except Exception as e:
         print(f"Error initializing MongoDB: {str(e)}")
         return False
-
+    
 def check_login(username: str, password: str) -> tuple[bool, str]:
    try:
        user = users_collection.find_one({'username': username})
@@ -447,28 +476,36 @@ def create_login_interface():
             output_message = gr.Textbox(label="Message", interactive=False)
         
         with gr.Tab("Register"):
-            new_username = gr.Textbox(label="New Username")
-            new_password = gr.Textbox(label="New Password", type="password")
+            new_username = gr.Textbox(label="Username")
+            new_password = gr.Textbox(label="Password", type="password")
             confirm_password = gr.Textbox(label="Confirm Password", type="password")
+            email = gr.Textbox(label="Email")
+            name = gr.Textbox(label="Full Name")
+            role = gr.Radio(choices=["student", "instructor"], label="Role", value="student")
             register_button = gr.Button("Register")
             register_message = gr.Textbox(label="Message", interactive=False)
             
-            def handle_registration(username, password, confirm):
+            def handle_registration(username, password, confirm, email, name, role):
                 if password != confirm:
                     return "Passwords do not match"
                 if len(password) < 6:
                     return "Password must be at least 6 characters long"
-                success, message = create_new_user(username, password)
+                if not email or '@' not in email:
+                    return "Please provide a valid email address"
+                if not name:
+                    return "Please provide your full name"
+                
+                success, message = create_new_user(username, password, email, name, role)
                 return message
             
             register_button.click(
                 fn=handle_registration,
-                inputs=[new_username, new_password, confirm_password],
+                inputs=[new_username, new_password, confirm_password, email, name, role],
                 outputs=register_message
             )
         
         return login_interface, username, password, login_button, output_message
-
+    
 # Create the main application interface
 def create_main_interface(username: str):
    with gr.Blocks(title="Upload New Lecture") as main_interface:
